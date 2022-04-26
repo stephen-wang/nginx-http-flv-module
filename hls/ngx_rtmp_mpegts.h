@@ -13,6 +13,13 @@
 #include <openssl/aes.h>
 
 
+typedef enum {
+    NGX_RTMP_MEDIA_UNKNOWN = 0,
+    NGX_RTMP_MEDIA_AUDIO_ONLY = 1,
+    NGX_RTMP_MEDIA_VIDEO_ONLY = 2,
+    NGX_RTMP_MEDIA_AUDIO_VIDEO = 3,
+} ngx_rtmp_media_type_t;
+
 typedef struct {
     ngx_fd_t    fd;
     ngx_log_t  *log;
@@ -42,5 +49,7 @@ ngx_int_t ngx_rtmp_mpegts_close_file(ngx_rtmp_mpegts_file_t *file);
 ngx_int_t ngx_rtmp_mpegts_write_frame(ngx_rtmp_mpegts_file_t *file,
     ngx_rtmp_mpegts_frame_t *f, ngx_buf_t *b);
 
+ngx_int_t ngx_rtmp_mpegts_update_header(ngx_rtmp_mpegts_file_t *file,
+    u_char *path, ngx_rtmp_media_type_t media_type);
 
 #endif /* _NGX_RTMP_MPEGTS_H_INCLUDED_ */

@@ -4,11 +4,15 @@
  */
 
 
+#include <assert.h>
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include "ngx_rtmp_mpegts.h"
 
 
+#define NGX_RTMP_MPEGTS_PACK_SIZE 188
+
+/* default mpegts header including video and audio stream info */
 static u_char ngx_rtmp_mpegts_header[] = {
 
     /* TS */
@@ -70,6 +74,33 @@ static u_char ngx_rtmp_mpegts_header[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
+/* audio-only pmt, no stuffing bytes included */
+static u_char ngx_rtmp_mpegts_header_pmt_a[] = {
+    /* TS */
+    0x47, 0x50, 0x01, 0x10, 0x00,
+    /* PSI */
+    0x02, 0xb0, 0x12, 0x00, 0x01, 0xc1, 0x00, 0x00,
+    /* PMT */
+    0xe1, 0x00,
+    0xf0, 0x00,
+    0x0f, 0xe1, 0x01, 0xf0, 0x00, /* aac */
+    /* CRC */
+    0xb7, 0x43, 0x6c, 0x5e
+};
+
+/* video-only pmt, no stuffing bytes included */
+static u_char ngx_rtmp_mpegts_header_pmt_v[] = {
+    /* TS */
+    0x47, 0x50, 0x01, 0x10, 0x00,
+    /* PSI */
+    0x02, 0xb0, 0x12, 0x00, 0x01, 0xc1, 0x00, 0x00,
+    /* PMT */
+    0xe1, 0x00,
+    0xf0, 0x00,
+    0x1b, 0xe1, 0x00, 0xf0, 0x00, /* h264 */
+    /* CRC */
+    0x15, 0xbd, 0x4d, 0x56
+};
 
 /* 700 ms PCR delay */
 #define NGX_RTMP_HLS_DELAY  63000
@@ -155,10 +186,71 @@ ngx_rtmp_mpegts_write_file(ngx_rtmp_mpegts_file_t *file, u_char *in,
 
 
 static ngx_int_t
+ngx_rtmp_mpegts_get_pmt_data(ngx_rtmp_media_type_t media_type,
+                             u_char* pmt_buf, ngx_log_t *log)
+{
+    if ((media_type != NGX_RTMP_MEDIA_AUDIO_ONLY &&
+         media_type != NGX_RTMP_MEDIA_VIDEO_ONLY) || !pmt_buf)
+    {
+        ngx_log_error(NGX_LOG_ERR, log, -1,
+                      "hls: error getting PMT data, media_type %d", media_type);
+        return NGX_ERROR;
+    }
+
+    int stuff_len = 0;
+    if (media_type == NGX_RTMP_MEDIA_AUDIO_ONLY)
+    {
+        ngx_memcpy(pmt_buf,  ngx_rtmp_mpegts_header_pmt_a, sizeof(ngx_rtmp_mpegts_header_pmt_a));
+        stuff_len = NGX_RTMP_MPEGTS_PACK_SIZE - sizeof(ngx_rtmp_mpegts_header_pmt_a);
+    } else {
+        ngx_memcpy(pmt_buf,  ngx_rtmp_mpegts_header_pmt_v, sizeof(ngx_rtmp_mpegts_header_pmt_v));
+        stuff_len = NGX_RTMP_MPEGTS_PACK_SIZE - sizeof(ngx_rtmp_mpegts_header_pmt_v);
+    }
+
+    ngx_memset(pmt_buf+NGX_RTMP_MPEGTS_PACK_SIZE-stuff_len, 0xff, stuff_len);
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_rtmp_mpegts_write_header(ngx_rtmp_mpegts_file_t *file)
 {
     return ngx_rtmp_mpegts_write_file(file, ngx_rtmp_mpegts_header,
                                       sizeof(ngx_rtmp_mpegts_header));
+}
+
+ngx_int_t
+ngx_rtmp_mpegts_update_header(ngx_rtmp_mpegts_file_t *file, u_char *path,
+                              ngx_rtmp_media_type_t media_type)
+{
+    /* the framgent file should be closed when updating header */
+    assert(file->fd == NGX_INVALID_FILE);
+    assert(file->size == 0);
+
+    /* this function is for audio-only or video-only stream */
+    assert(media_type == NGX_RTMP_MEDIA_AUDIO_ONLY ||
+           media_type == NGX_RTMP_MEDIA_VIDEO_ONLY);
+
+    file->fd = ngx_open_file(path, NGX_FILE_RDWR, NGX_FILE_OPEN,
+                             NGX_FILE_DEFAULT_ACCESS);
+
+    if (file->fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, file->log, ngx_errno,
+                      "hls: error opening fragment file");
+        return NGX_ERROR;
+    }
+
+    ngx_int_t ret = lseek(file->fd, NGX_RTMP_MPEGTS_PACK_SIZE, SEEK_SET);
+    if (ret == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, file->log, ngx_errno,
+                      "hls: error seeking fragment file");
+        return NGX_ERROR;
+    }
+
+    u_char pmt_buf[NGX_RTMP_MPEGTS_PACK_SIZE];
+    ngx_rtmp_mpegts_get_pmt_data(media_type, pmt_buf, file->log);
+    ret = ngx_rtmp_mpegts_write_file(file, pmt_buf, sizeof(pmt_buf));
+    ngx_close_file(file->fd);
+    return ret;
 }
 
 
@@ -209,7 +301,6 @@ ngx_rtmp_mpegts_write_frame(ngx_rtmp_mpegts_file_t *file,
                    "dts=%uL, key=%ui, size=%ui",
                    f->pid, f->sid, f->pts, f->dts,
                    (ngx_uint_t) f->key, (size_t) (b->last - b->pos));
-
     first = 1;
 
     while (b->pos < b->last) {
@@ -394,6 +485,8 @@ ngx_rtmp_mpegts_close_file(ngx_rtmp_mpegts_file_t *file)
     }
 
     ngx_close_file(file->fd);
+    file->fd = NGX_INVALID_FILE;
+    file->size = 0;
 
     return NGX_OK;
 }

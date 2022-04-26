@@ -129,6 +129,7 @@ typedef struct {
 #define NGX_RTMP_HLS_TYPE_LIVE          1
 #define NGX_RTMP_HLS_TYPE_EVENT         2
 
+static ngx_rtmp_media_type_t ngx_rtmp_media_type = NGX_RTMP_MEDIA_UNKNOWN;
 
 static ngx_conf_enum_t                  ngx_rtmp_hls_naming_slots[] = {
     { ngx_string("sequential"),         NGX_RTMP_HLS_NAMING_SEQUENTIAL },
@@ -830,6 +831,21 @@ ngx_rtmp_hls_close_fragment(ngx_rtmp_session_t *s)
                    "hls: close fragment n=%uL", ctx->frag);
 
     ngx_rtmp_mpegts_close_file(&ctx->file);
+
+    /* Update mpegts header for video-only/audio-only stream */
+    if (ngx_rtmp_media_type == NGX_RTMP_MEDIA_AUDIO_ONLY ||
+        ngx_rtmp_media_type == NGX_RTMP_MEDIA_VIDEO_ONLY) {
+        if (ngx_rtmp_mpegts_update_header(&ctx->file, ctx->stream.data,
+                                          ngx_rtmp_media_type)
+            != NGX_OK) {
+
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, ngx_errno,
+                          "hls: error writing fragment header");
+            return NGX_ERROR;
+        }
+    }
+
+    ngx_rtmp_media_type = NGX_RTMP_MEDIA_UNKNOWN;
 
     ctx->opened = 0;
 
@@ -1662,6 +1678,10 @@ ngx_rtmp_hls_flush_audio(ngx_rtmp_session_t *s)
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "hls: flush audio pts=%uL", frame.pts);
 
+    if ((ngx_rtmp_media_type & NGX_RTMP_MEDIA_AUDIO_ONLY) == 0) {
+        ngx_rtmp_media_type |= NGX_RTMP_MEDIA_AUDIO_ONLY;
+    }
+
     rc = ngx_rtmp_mpegts_write_frame(&ctx->file, &frame, b);
 
     if (rc != NGX_OK) {
@@ -2038,6 +2058,10 @@ ngx_rtmp_hls_video(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "hls: video pts=%uL, dts=%uL", frame.pts, frame.dts);
+
+    if ((ngx_rtmp_media_type & NGX_RTMP_MEDIA_VIDEO_ONLY) == 0) {
+        ngx_rtmp_media_type |= NGX_RTMP_MEDIA_VIDEO_ONLY;
+    }
 
     if (ngx_rtmp_mpegts_write_frame(&ctx->file, &frame, &out) != NGX_OK) {
         ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
